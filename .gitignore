@@ -1,1 +1,3 @@
 upstream-pydf/
+__pycache__/
+*.pyc
