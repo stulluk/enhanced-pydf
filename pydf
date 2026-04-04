@@ -1,0 +1,1121 @@
+#! /usr/bin/python
+
+import sys, os, re, string, struct, unicodedata
+from optparse import OptionParser
+
+from math import log
+
+if not 'lexists' in dir(os.path):
+    # for python < 2.4
+    # will not give the same result for broken symbolic links, but who cares...
+    os.path.lexists = os.path.exists
+
+if sys.version_info[0] < 3:
+    # getoutput() and getstatusoutput() methods have
+    # been moved from commands to the subprocess module
+    # with Python >= 3.x
+    import commands as my_subprocess
+else:
+    import subprocess as my_subprocess
+
+str_ljust = str.ljust
+str_rjust = str.rjust
+str_center = str.center
+
+
+# again an ugly hack for python < 2.4
+try:
+    str_ljust('dummy', 1, '.')
+except TypeError:
+    str_ljust  = lambda x, y, z: string.ljust  (x, y).replace(' ', z)
+    str_rjust  = lambda x, y, z: string.rjust  (x, y).replace(' ', z)
+    str_center = lambda x, y, z: string.center (x, y).replace(' ', z)
+
+class Bar:
+    def __init__(self, percentage=0, width=2, header=False):
+        self.percentage = percentage
+        self.width = width
+        self.header = header
+
+    def __len__(self):
+        return self.width
+
+    def __str__(self):
+        return self.format(self, 'l')
+
+    def format(self, pos):
+        if self.header:
+            return ' '*self.width
+        size = int(round(self.percentage*(self.width-2)))
+        return '['+manglestring(size*barchar, self.width-2, pos, bar_fillchar)+']'
+
+
+def get_terminal_width_termios():
+    try:
+        import fcntl, termios
+    except ImportError:
+        return None
+    s = struct.pack("HHHH", 0, 0, 0, 0)
+    try:
+        lines, cols, xpixels, ypixels = \
+            struct.unpack(
+                "HHHH", 
+                fcntl.ioctl(sys.stdout.fileno(),
+                termios.TIOCGWINSZ, s)
+                )
+    except (IOError, AttributeError):
+        return None
+    return cols
+
+def get_terminal_width_resize():
+    status, output = my_subprocess.getstatusoutput('resize')
+    if status!=0: # error in running resize
+        return None
+    c = output.split('\n')
+    c = [x for x in c if x.startswith('COLUMNS=')]
+    if c:
+        c = c[0]
+        dummy, c = c.split('=', 1)
+        if c[-1] == ';':
+            c = c[:-1]
+    if c:
+        return int(c)
+    else:
+        return None
+
+def get_terminal_width_dumb():
+    return 80
+
+def get_terminal_width():
+    handlers = [get_terminal_width_termios, get_terminal_width_resize, get_terminal_width_dumb]
+    for handler in handlers:
+        width = handler()
+        if width:
+            return width
+    return 80 # fallback, should not happen
+
+
+def find_mountpoint(path):
+    if not os.path.lexists(path):
+        sys.stderr.write('pydf: %s: No such file or directory\n' % repr(path))
+        return None
+    while not os.path.ismount(path):
+        path = os.path.dirname(path)
+    return path
+
+
+
+#some default definitions
+colours = {    
+            'none'       :    "",
+            'default'    :    "\033[0m",
+            'bold'       :    "\033[1m",
+            'underline'  :    "\033[4m",
+            'blink'      :    "\033[5m",
+            'reverse'    :    "\033[7m",
+            'concealed'  :    "\033[8m",
+
+            'black'      :    "\033[30m", 
+            'red'        :    "\033[31m",
+            'green'      :    "\033[32m",
+            'yellow'     :    "\033[33m",
+            'blue'       :    "\033[34m",
+            'magenta'    :    "\033[35m",
+            'cyan'       :    "\033[36m",
+            'white'      :    "\033[37m",
+
+            'on_black'   :    "\033[40m", 
+            'on_red'     :    "\033[41m",
+            'on_green'   :    "\033[42m",
+            'on_yellow'  :    "\033[43m",
+            'on_blue'    :    "\033[44m",
+            'on_magenta' :    "\033[45m",
+            'on_cyan'    :    "\033[46m",
+            'on_white'   :    "\033[47m",
+
+            'beep'       :    "\007"
+            }
+
+
+normal_colour = 'default'
+header_colour = 'yellow'
+local_fs_colour = 'default'
+remote_fs_colour = 'green'
+special_fs_colour = 'blue'
+readonly_fs_colour = 'cyan'
+filled_fs_colour = 'red'
+full_fs_colour = 'on_red'
+custom_device_colour = {} #TODO
+
+sizeformat = "-h"
+column_separator = ' '
+column_separator_colour = 'none'
+row_separator = ''
+hidebinds = True
+
+stretch_screen = 0.3
+
+do_total_sum = False
+
+FILL_THRESH = 95.0
+FULL_THRESH = 99.0
+
+
+format = [
+            ('fs', 10, "l"),
+            ('size', 5, "r"),
+            ('used', 5, "r"), ('avail', 5, "r"), ('perc', 4, "r"),
+            ('bar', 0.1, "l"), ('on', 11, "l"),
+            ('disk', 22, "l"), ('iface', 6, "l"), ('speed', 28, "l"),
+         ]
+
+# When False, the disk column is omitted (see also --no-disk).
+show_disk = True
+
+
+barchar = '#'
+bar_fillchar = '.'
+
+mountfile = ['/etc/mtab', '/etc/mnttab', '/proc/mounts']
+
+
+#end of default definitions
+
+# read configuration file
+for conffile in ["/etc/pydfrc", os.environ['HOME']+"/.pydfrc"]:
+    if os.path.isfile(conffile):
+        exec(compile(open(conffile).read(), conffile, 'exec'))
+
+
+header =    {
+            'fs'     :    "Filesystem",
+            'disk'   :    "Disk",
+            'iface'  :    "Bus",
+            'speed'  :    "Link max",
+            'size'   :    "Size",
+            'used'   :    "Used",
+            'avail'  :    "Avail",
+            'on'     :    "Mounted on",
+            'fstype' :    "Type",
+            'perc'   :    "Use%",
+            'bar'    :    Bar(header=True),
+            }
+
+def sanitize_output(s):
+    "sanitize nonprintable characters for printing"
+    r = ''
+    for c in s:
+        if ord(c)<32:
+            r += r'\x%02x' % ord(c)
+        # surrogate characters encoding non-decodable bytes in the names of mountpoints
+        elif 0xdc80 <= ord(c) <= 0xdcff:
+            r += r'\x%02x' % (ord(c)-0xdc00)
+        # in python2, we have str, not unicode here - just give up and do not test for strange unicode characters
+        elif sys.version_info[0] >= 3 and (unicodedata.category(c)[0]=='C' or unicodedata.category(c) in ('Zl', 'Zp')):
+            if ord(c) <= 0xffff:
+                r += r'\u%04X' % ord(c)
+            else:
+                r += r'\U%08X' % ord(c)
+        else:
+            r += c
+    return r
+
+def out(s):
+    try:
+        sys.stdout.write(s)
+    except UnicodeEncodeError:
+        sys.stdout.write(s.encode('ascii', 'ignore').decode())
+
+class DumbStatus:
+    "emulates statvfs results with only zero values"
+    f_bsize = f_frsize = f_blocks = f_bfree = f_bavail = f_files = f_ffree = f_favail = f_flag = f_namemax =0
+
+def hfnum(size, base):
+    "human readable number"
+    if size == 0:
+        return "0"
+    if size < 0:
+        return "?"
+    if inodes:
+        units = [""]
+    else:
+        units = ["B"]
+    units += ["k", "M", "G", "T", "P", "Z", "Y"]
+    power = int(log(size)/log(base))
+    if power < 0:
+        power = 0
+    if power >= len(units):
+        power = len(units)-1
+    nsize = int(round(1.*size/(base**power)))
+    if nsize < 10 and power >= 1:
+        power -= 1
+        nsize = int(round(1.*size/(base**power)))
+    r = str(nsize) + units[power]
+    return r
+
+
+def myformat(number, sizeformat, fs_blocksize):
+    "format number as file size. fs_blocksize here is a filesysem blocksize"
+    size = int(number)*fs_blocksize
+    if blocksize: # that is, blocksize was explicitly set up
+        sn = round(1.*size/blocksize)
+        sn = int(sn)
+        return str(sn)
+    if sizeformat == "-k":
+        sn = round(size/1024.)
+        sn = int(sn)
+        return str(sn)
+    elif sizeformat == "-m":
+        sn = round(size/(1024.*1024))
+        sn = int(sn)
+        return str(sn)
+    elif sizeformat == "-g":
+        sn = round(size/(1024.*1024*1024))
+        sn = int(sn)
+        return str(sn)
+    elif sizeformat == "-h":
+        return hfnum(size, 1024)
+    elif sizeformat == "-H":
+        return hfnum(size, 1000)
+    elif sizeformat == "--blocks":
+        return str(number)
+    else: # this should not happen
+        raise ValueError("Impossible error, contact the author, sizeformat="+repr(sizeformat))
+
+
+def manglestring(s, l, pos, fillchar=' '):
+    "cut string to fit exactly into l chars"
+    if pos == "r":
+        ns = str_rjust(s, l, fillchar)
+    elif pos == "l":
+        ns = str_ljust(s, l, fillchar)
+    elif pos == "c":
+        ns = str_center(s, l, fillchar)
+    else:
+        raise ValueError('Error in manglestring')
+    if len(ns) > l:
+        ns = ns[:int(l/2)] + "~" + ns[-int(l/2)+1:]
+    return ns
+
+def makecolour(clist):
+    "take list (or tuple or just one name) of colour names and return string of ANSI definitions"
+    s = ""
+    if type(clist) == str:
+        lclist = [clist]
+    else:
+        lclist = clist
+    for i in lclist:
+        s = s + colours[i]
+    return s
+
+def version():
+    return '12+disk+bus'
+
+def get_all_mountpoints():
+    "return all mountpoints in fs"
+
+    # fallback when nothing else works
+    dummy_result = {'/': ('/', '')}
+
+    if isinstance(mountfile, str):
+        f = open(mountfile,"rb")
+    else:
+        for i in mountfile:
+            if os.path.exists(i):
+                f = open(i,"rb")
+                break
+        else:
+            # fallback, first try to parse mount output
+            status, mout = my_subprocess.getstatusoutput('mount')
+            if status !=0:
+                return dummy_result
+            mlines = mout.split('\n')
+            r = {}
+            for line in mlines:
+                if not ' on ' in line:
+                    continue
+                device, on = line.split(' on ', 1)
+                device = device.split()[0]
+                onparts = on.split()
+                on = onparts[0]
+                # option format: (a,b,..)
+                opts = onparts[-1][1:-1].split(',')
+                r[on] = (device, '', opts)
+
+            if r:
+                return r
+            else:
+                return dummy_result
+
+    mountlines = f.readlines() # bytes in python3
+
+    # convert to representable strings (for python3)
+    # unfortunately, we cannot keep it as bytes, because of a known bug
+    # in python3 forcing us to use string, not bytes as filename for os.statvfs
+    if sys.version_info[0]>=3:
+        errhandler = 'surrogateescape'
+        if sys.version_info[1]<1:
+            errhandler = 'replace'
+        mountlines = [x.decode(sys.stdin.encoding, errhandler) for x in mountlines]
+    r = {}
+    for l in mountlines:
+        spl = l.split()
+        if len(spl)<4:
+            print("Error in", mountfile)
+            print(repr(l))
+            continue
+        device, mp, typ, opts = spl[0:4]
+        opts = opts.split(',')
+        r[mp] = (device, typ, opts)
+    return r
+
+def niceprint_fs(fs):
+    "print LVM as nice symlink"
+    matchObj = re.search( r'^\/dev\/mapper\/(.*)-(.*)', str(fs)) # will fail in python3if fs canot be converted to unicode
+    if matchObj:
+        return "/dev/" + matchObj.group(1) + "/" + matchObj.group(2)
+    else:
+        return fs
+
+_disk_info_cache = {}
+_lsblk_vmt_cache = {}
+_pkname_cache = {}
+_sata_spd_cache = {}
+
+
+def _decode_subprocess_output(out):
+    "Normalize bytes output from subprocess to a unicode/str line."
+    if sys.version_info[0] >= 3 and isinstance(out, bytes):
+        return out.decode(sys.getfilesystemencoding() or "utf-8", "replace")
+    return out
+
+
+def _unescape_udev_enc(s):
+    "Turn udev-style \\xNN sequences in lsblk output into real characters."
+    def repl(match):
+        return chr(int(match.group(1), 16))
+
+    return re.sub(r"\\x([0-9a-fA-F]{2})", repl, s)
+
+
+def _kernel_block_disk_name(dev_path):
+    "Return top-level block device name (e.g. sda, nvme0n1) for dev_path."
+    if dev_path in _pkname_cache:
+        return _pkname_cache[dev_path]
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["lsblk", "-dnr", "-o", "PKNAME", dev_path],
+            stderr=subprocess.STDOUT,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        base = os.path.basename(os.path.realpath(dev_path))
+        _pkname_cache[dev_path] = base or None
+        return _pkname_cache[dev_path]
+    line = _decode_subprocess_output(out).strip().split("\n")
+    parent = line[0].strip() if line else ""
+    if parent:
+        _pkname_cache[dev_path] = parent
+        return parent
+    base = os.path.basename(os.path.realpath(dev_path))
+    _pkname_cache[dev_path] = base or None
+    return _pkname_cache[dev_path]
+
+
+def _disk_backend_dev_path(dev_path):
+    "Whole-disk path for lsblk (e.g. /dev/sda for /dev/sda1)."
+    pk = _kernel_block_disk_name(dev_path)
+    if pk:
+        return os.path.join("/dev", pk)
+    base = os.path.basename(os.path.realpath(dev_path))
+    if base:
+        return os.path.join("/dev", base)
+    return dev_path
+
+
+def _lsblk_vendor_model_tran(backend_dev):
+    "One lsblk -P call: vendor, model, transport (TRAN); cached per backend."
+    if backend_dev in _lsblk_vmt_cache:
+        return _lsblk_vmt_cache[backend_dev]
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["lsblk", "-dnP", "-o", "VENDOR,MODEL,TRAN", backend_dev],
+            stderr=subprocess.STDOUT,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        _lsblk_vmt_cache[backend_dev] = ("", "", "")
+        return _lsblk_vmt_cache[backend_dev]
+    line = _decode_subprocess_output(out).strip().split("\n")[0] if out else ""
+    pairs = dict(re.findall(r'([A-Z_]+)="([^"]*)"', line))
+    tup = (
+        pairs.get("VENDOR", "").strip(),
+        pairs.get("MODEL", "").strip(),
+        pairs.get("TRAN", "").strip(),
+    )
+    _lsblk_vmt_cache[backend_dev] = tup
+    return tup
+
+
+def _format_vendor_model_label(vendor, model, rpath_for_sysfs):
+    "Build disk label from lsblk fields; fall back to sysfs on the mount device."
+    vendor = " ".join(vendor.split())
+    model = " ".join(model.split())
+    if vendor in ("", "-") and not model:
+        return _disk_model_sysfs(rpath_for_sysfs)
+    if not model:
+        combined = vendor if vendor else _disk_model_sysfs(rpath_for_sysfs)
+        if combined == "-":
+            return combined
+        return _unescape_udev_enc(combined)
+    if not vendor or vendor == "-":
+        combined = model
+    else:
+        combined = "%s %s" % (vendor, model)
+    return _unescape_udev_enc(combined)
+
+
+def _infer_tran_from_basename(bn):
+    "Guess transport when lsblk TRAN is empty."
+    if not bn:
+        return ""
+    if bn.startswith("nvme"):
+        return "nvme"
+    if re.match(r"^sd[a-z]+$", bn):
+        return ""
+    return ""
+
+
+def _iface_display(tran_l):
+    "Short bus label for the iface column."
+    if not tran_l:
+        return "-"
+    pretty = {
+        "nvme": "NVMe",
+        "sata": "SATA",
+        "usb": "USB",
+        "sas": "SAS",
+        "iscsi": "iSCSI",
+        "fc": "FC",
+    }
+    return pretty.get(tran_l, tran_l.upper())
+
+
+def _read_sysfs_text(path):
+    try:
+        with open(path, "rb") as f:
+            return _decode_subprocess_output(f.read()).strip()
+    except (OSError, IOError):
+        return ""
+
+
+def _pcie_gen_from_gt_line(gt_line):
+    "Map max_link_speed line (e.g. '16.0 GT/s PCIe') to a generation label."
+    m = re.match(r"([\d.]+)", gt_line.strip())
+    if not m:
+        return "?"
+    v = float(m.group(1))
+    if v < 4.0:
+        return "1"
+    if v < 6.0:
+        return "2"
+    if v < 10.0:
+        return "3"
+    if v < 20.0:
+        return "4"
+    return "5"
+
+
+# Approximate PCIe 3.0+ effective data rate per lane (one direction), GB/s
+# (128b/130b encoding). Gen1/2 use 8b/10b; values are rounded references only.
+_PCIE_LANE_GBPS = {
+    "1": 0.250,
+    "2": 0.500,
+    "3": 0.985,
+    "4": 1.969,
+    "5": 3.938,
+}
+
+
+def _pcie_approx_throughput_label(gen_str, lanes_str):
+    "Static-table style ~GB/s hint for Gen x lanes (theoretical, one direction)."
+    try:
+        lanes_i = int(str(lanes_str).strip())
+    except ValueError:
+        return ""
+    gbps_lane = _PCIE_LANE_GBPS.get(gen_str)
+    if gbps_lane is None:
+        return ""
+    total = gbps_lane * lanes_i
+    if total >= 10.0:
+        return "~%.0f GB/s" % round(total)
+    if total >= 1.0:
+        return "~%.1f GB/s" % round(total, 1)
+    return "~%.2f GB/s" % total
+
+
+def _sata_sysfs_link_speed_raw(block_basename):
+    "Read kernel sata_spd via scsi_host port_no or unique_id -> ata linkN; else single-link fallback."
+    if block_basename in _sata_spd_cache:
+        return _sata_spd_cache[block_basename]
+    raw = ""
+    dev_p = "/sys/block/%s/device" % block_basename
+    if re.match(r"^sd[a-z]+$", block_basename) and os.path.exists(dev_p):
+        sd_dev = os.path.realpath(dev_p)
+        hm = re.search(r"/host(\d+)/", sd_dev)
+        if hm:
+            host_n = hm.group(1)
+            sh_base = "/sys/class/scsi_host/host%s" % host_n
+            port = _read_sysfs_text(os.path.join(sh_base, "port_no")).strip()
+            if not port.isdigit():
+                port = _read_sysfs_text(os.path.join(sh_base, "unique_id")).strip()
+            if port.isdigit():
+                idx = sd_dev.find("/host%s/" % host_n)
+                if idx > 0:
+                    ata_dir = sd_dev[:idx]
+                    link_tag = "link%s" % port
+                    spd_p = os.path.join(
+                        ata_dir, link_tag, "ata_link", link_tag, "sata_spd"
+                    )
+                    if os.path.isfile(spd_p):
+                        raw = _read_sysfs_text(spd_p)
+            if not raw:
+                mata = re.search(r"(.*)/host\d+/target", sd_dev)
+                if mata:
+                    ata_dir = mata.group(1)
+                    link_dirs = []
+                    try:
+                        for name in os.listdir(ata_dir):
+                            if name.startswith("link") and name[4:].isdigit():
+                                lt = name
+                                spd_p = os.path.join(
+                                    ata_dir, lt, "ata_link", lt, "sata_spd"
+                                )
+                                if os.path.isfile(spd_p):
+                                    v = _read_sysfs_text(spd_p)
+                                    if v and v != "<unknown>":
+                                        link_dirs.append(v)
+                    except OSError:
+                        pass
+                    if len(link_dirs) == 1:
+                        raw = link_dirs[0]
+    _sata_spd_cache[block_basename] = raw
+    return raw
+
+
+def _sata_link_speed_display(block_basename):
+    "Human-readable SATA link from sysfs; no fixed 6 Gb/s assumption."
+    line = _sata_sysfs_link_speed_raw(block_basename)
+    if not line or line == "<unknown>":
+        return "link n/a"
+    m = re.match(r"([\d.]+)", line)
+    if not m:
+        return line
+    gbps = float(m.group(1))
+    if gbps <= 1.6:
+        gen = "I"
+    elif gbps <= 3.1:
+        gen = "II"
+    elif gbps <= 6.1:
+        gen = "III"
+    else:
+        gen = ""
+    if gen:
+        return "%s (SATA %s)" % (line.strip(), gen)
+    return line.strip()
+
+
+def _nvme_link_max_summary(block_basename):
+    "PCIe max link from sysfs for nvmeXnY -> nvmeX, plus static ~GB/s hint."
+    m = re.match(r"(nvme\d+)n\d+", block_basename)
+    if not m:
+        return ""
+    ctrl = m.group(1)
+    base = "/sys/class/nvme/%s/device" % ctrl
+    spd = _read_sysfs_text(os.path.join(base, "max_link_speed"))
+    wid = _read_sysfs_text(os.path.join(base, "max_link_width"))
+    if not spd or not wid:
+        return ""
+    gen = _pcie_gen_from_gt_line(spd)
+    core = "PCIe Gen%s x%s" % (gen, wid.strip())
+    approx = _pcie_approx_throughput_label(gen, wid)
+    if approx:
+        return "%s (%s)" % (core, approx)
+    return core
+
+
+def _usb_speed_mbps(block_basename):
+    "Walk sysfs up from /sys/block/sdX/device to find USB speed (Mbps)."
+    if not re.match(r"^sd[a-z]+$", block_basename):
+        return None
+    dev_l = "/sys/block/%s/device" % block_basename
+    if not os.path.exists(dev_l):
+        return None
+    cur = os.path.realpath(dev_l)
+    for _dummy in range(20):
+        sp = os.path.join(cur, "speed")
+        if os.path.isfile(sp):
+            txt = _read_sysfs_text(sp)
+            if txt.isdigit():
+                return int(txt)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return None
+
+
+def _usb_speed_nominal_gbps(mbps):
+    "Rough theoretical headline rate from USB speed file (Mbps)."
+    if mbps <= 12:
+        return "USB 1.x"
+    if mbps <= 480:
+        return "USB 2 (480 Mb/s)"
+    if mbps <= 5000:
+        return "~5 Gb/s"
+    if mbps <= 10000:
+        return "~10 Gb/s"
+    if mbps <= 20000:
+        return "~20 Gb/s"
+    return "~40+ Gb/s"
+
+
+def _theoretical_link_speed(tran_l, backend_dev):
+    "Nominal interface speed; sysfs only where it is a few file reads."
+    bn = os.path.basename(os.path.realpath(backend_dev))
+    if tran_l == "nvme":
+        s = _nvme_link_max_summary(bn)
+        return s if s else "NVMe"
+    if tran_l == "sata":
+        return _sata_link_speed_display(bn)
+    if tran_l == "usb":
+        mbps = _usb_speed_mbps(bn)
+        if mbps is not None:
+            return _usb_speed_nominal_gbps(mbps)
+        return "~5 Gb/s"
+    if tran_l == "sas":
+        return "12 Gb/s"
+    if tran_l in ("iscsi", "fc"):
+        return "-"
+    if tran_l:
+        return "-"
+    return "-"
+
+
+def _disk_model_sysfs(dev_path):
+    "Read vendor/model from sysfs for the backing block device."
+    bn = _kernel_block_disk_name(dev_path)
+    if not bn:
+        return "-"
+    vendor_p = "/sys/block/%s/device/vendor" % bn
+    model_p = "/sys/block/%s/device/model" % bn
+    vendor, model = "", ""
+    try:
+        if os.path.isfile(vendor_p):
+            with open(vendor_p, "rb") as f:
+                vendor = _decode_subprocess_output(f.read()).strip()
+    except (OSError, IOError):
+        pass
+    try:
+        if os.path.isfile(model_p):
+            with open(model_p, "rb") as f:
+                model = _decode_subprocess_output(f.read()).strip()
+    except (OSError, IOError):
+        pass
+    parts = []
+    for p in (vendor, model):
+        if p:
+            parts.append(" ".join(p.split()))
+    combined = " ".join(parts) if parts else "-"
+    return _unescape_udev_enc(combined) if combined != "-" else combined
+
+
+def disk_row_extras(device_raw, fstype):
+    "Return (disk_label, bus_label, theoretical_link) for a mount device; cached per rpath."
+    blank = ("-", "-", "-")
+    if is_remote_fs(fstype):
+        return blank
+    if not device_raw or not device_raw.startswith("/dev/"):
+        return blank
+    try:
+        rpath = os.path.realpath(device_raw)
+    except OSError:
+        rpath = device_raw
+    if rpath in _disk_info_cache:
+        return _disk_info_cache[rpath]
+    if not os.path.exists(rpath):
+        _disk_info_cache[rpath] = blank
+        return blank
+    backend = _disk_backend_dev_path(rpath)
+    vendor, model, tran = _lsblk_vendor_model_tran(backend)
+    disk_l = _format_vendor_model_label(vendor, model, rpath)
+    tran_l = (tran or "").strip().lower()
+    bn = os.path.basename(os.path.realpath(backend))
+    if not tran_l:
+        tran_l = _infer_tran_from_basename(bn)
+    iface_l = _iface_display(tran_l)
+    spd_l = _theoretical_link_speed(tran_l, backend)
+    row = (disk_l, iface_l, spd_l)
+    _disk_info_cache[rpath] = row
+    return row
+
+
+def disk_vendor_model(device_raw, fstype):
+    "Return vendor/model only (for compatibility); see disk_row_extras."
+    return disk_row_extras(device_raw, fstype)[0]
+
+
+def get_row_mp(mp):
+    # for python3, mp is bytes, not str
+    if mp:
+        if mp in mountpoints:
+            device_raw, fstype, opts = mountpoints[mp]
+            device = niceprint_fs(device_raw)
+        else:
+            # oops, the mountpoint is not in /etc/mtab or equivalent
+            # return dummy values
+            device_raw, fstype, opts = '-', '-', '-'
+            device = device_raw
+        rdonly = 'ro' in opts or fstype in  ("iso9660", "udf")
+        bind = 'bind' in opts or 'rbind' in opts
+
+        try:
+            status = os.statvfs(mp)
+        except (OSError, IOError):
+            status = DumbStatus()
+        fs_blocksize = status.f_bsize
+        if fs_blocksize == 0:
+            fs_blocksize = status.f_frsize
+        free = status.f_bfree
+        size = status.f_blocks
+        avail = status.f_bavail
+        inodes_free = status.f_ffree
+        inodes_size = status.f_files
+        inodes_avail = status.f_favail
+        if (size==0 or is_special_fs(fstype)) and not allfss:
+            return
+        if bind and hidebinds:
+            return
+        used = size-free
+        inodes_used = inodes_size - inodes_free
+
+        if inodes:
+            size_f = myformat(inodes_size, sizeformat, 1)
+            used_f = myformat(inodes_used, sizeformat, 1)
+            avail_f = myformat(inodes_avail, sizeformat, 1)
+            try:
+                perc = round(100.*inodes_used/inodes_size, 1)
+                perc_f = str(perc)
+            except ZeroDivisionError:
+                perc = 0
+                perc_f = '-'
+        else:
+            size_f = myformat(size, sizeformat, fs_blocksize)
+            used_f = myformat(used, sizeformat, fs_blocksize)
+            avail_f = myformat(avail, sizeformat, fs_blocksize)
+            try:
+                perc = round(100.*used/size, 1)
+                perc_f = str(perc)
+            except ZeroDivisionError:
+                perc = 0
+                perc_f = '-'
+
+
+        dsk_l, if_l, sp_l = disk_row_extras(device_raw, fstype)
+        info = {
+            'fs'     :    device,
+            'disk'   :    dsk_l,
+            'iface'  :    if_l,
+            'speed'  :    sp_l,
+            'size'   :    size_f,
+            'used'   :    used_f,
+            'avail'  :    avail_f,
+            'on'     :    mp,
+            'fstype' :    fstype,
+            'perc'   :    perc_f,
+            'bar'    :    None,
+                }
+        current_colour = local_fs_colour
+        if is_remote_fs(fstype):
+            current_colour = remote_fs_colour
+        elif size == 0 or is_special_fs(fstype):
+            current_colour = special_fs_colour
+    else: # header
+        current_colour = header_colour
+
+    row = []
+
+    for j in format:
+
+        if j[0]=='bar':
+            width = j[1]
+            if 0<width<1: # i.e. percentage
+                width = int(width*terminal_width)-1
+
+        if mp:
+            if j[0] in ['perc', 'avail', 'bar']:
+                if rdonly:
+                    current_colour = readonly_fs_colour
+                elif perc > FULL_THRESH:
+                    current_colour = full_fs_colour
+                elif perc > FILL_THRESH:
+                    current_colour = filled_fs_colour
+            if j[0]=='bar':
+                info['bar'] = Bar(perc/100., width)
+
+            text = info[j[0]]
+            # if there are control or invalid unicode characters in mountpoint names
+            if not isinstance(text, Bar):
+                text = sanitize_output(text)
+
+        else:
+            text = header[j[0]]
+            if j[0]=='bar':
+                text.width = width
+
+        column = [current_colour, text]
+        row.append(column)
+
+    return row
+
+
+def is_remote_fs(fs):
+    "test if fs (as type) is a remote one"
+    fs = fs.lower()
+
+    return fs in [ "nfs", "smbfs", "cifs", "ncpfs", "afs", "coda",
+                  "ftpfs", "mfs", "sshfs", "fuse.sshfs", "nfs4" ]
+
+def is_special_fs(fs):
+    "test if fs (as type) is a special one"
+    "in addition, a filesystem is special if it has number of blocks equal to 0"
+    fs = fs.lower()
+    return fs in [ "tmpfs", "devpts", "devtmpfs", "proc", "sysfs", "usbfs", "devfs", "fdescfs", "linprocfs" ]
+
+def get_table(mps):
+    "table is a list of rows"
+    "row is a list of columns"
+    "column is a list of [colour code, content]"
+    "content is a string, unless it is a Bar() instance"
+    rows = [get_row_mp(None)]
+    for mp in mps:
+        row = get_row_mp(mp)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def squeeze_table(table, desired_width):
+    "squeeze table to fit into width characters"
+
+    cols = len(table[0])
+
+    # build a row of minimal (possible, from format) cell sizes
+    minrow = []
+    for j in format:
+        width = j[1]
+        if 0 < width < 1: # i.e. percentage
+            width = int(width*terminal_width)-1
+        minrow.append(width)
+
+    # row of maximal cell sizes 
+    maxrow = [0]*cols
+
+    for row in table:
+        for col in range(cols):
+            colsize = len(row[col][1])
+            maxrow[col] = max(maxrow[col], colsize)
+
+    # maximal differences between (real cell size - minimal possible cell size)
+    deltarow = [maxrow[i]-minrow[i] for i in range(cols)]
+
+    deltas = list(zip(deltarow, list(range(cols))))
+    deltas.sort()
+    deltas.reverse()
+
+    # how many characters we need to cut off from table width
+    to_reduce = sum(maxrow) + (cols-1)*len(column_separator) - desired_width
+
+    to_stretch = 0
+    # if there is free space
+    if to_reduce < 0 and stretch_screen:
+        # -to_reduce is now number of spare characters
+        to_stretch = int(-to_reduce * stretch_screen)
+
+    new_maxrow = maxrow[:] # new sizes
+    for delta, i in deltas:
+        if to_reduce < 0:
+            # we have finished
+            break
+        if delta >= to_reduce:
+            new_maxrow[i] -= to_reduce
+            # and we finished
+            to_reduce = 0
+            break
+        else:
+            new_maxrow[i] -= delta # now it contains the minimal possible width
+            to_reduce -= delta
+
+    if to_reduce > 0:
+        # we were not able to reduce the size enough
+        # since it will wrap anywway, we might as well display 
+        # complete long lines
+        new_maxrow = maxrow
+    for row in table:
+        for col in range(cols):
+            cell_content = row[col][1]
+            if isinstance(cell_content, Bar):
+                cell_content.width += to_stretch
+                formatted_cell_content = cell_content.format(format[col][2])
+            else:
+                formatted_cell_content = manglestring(cell_content, new_maxrow[col], format[col][2])
+            row[col][1] = formatted_cell_content
+
+
+def display_table(table, terminal_width):
+    "display our internal output table"
+
+    squeeze_table(table, terminal_width-1)
+
+    colsepcol = makecolour(column_separator_colour)
+    for row in table:
+        firstcol = True
+        for colourcode, text in row:
+            if firstcol:
+                firstcol = False
+            else:
+                out(colsepcol)
+                out(column_separator)
+            out(makecolour(colourcode))
+            out(text)
+        out(row_separator)
+        out(makecolour(normal_colour))
+        out('\n')
+
+
+
+# the fun begins here
+
+parser = OptionParser(usage="usage: %prog [options] arg", add_help_option=False)
+
+parser.version = '%prog version ' + version()
+
+parser.add_option("", "--help", action="help", help="show this help message")
+parser.add_option("-v", "--version", action="version", help="show version")
+
+parser.add_option("-a", "--all",
+      action="store_true", dest="show_all", default=False,
+      help="include filesystems having 0 blocks")
+parser.add_option("-h", "--human-readable",
+      action="store_const", const='-h', dest="sizeformat",
+      help="print sizes in human readable format (e.g., 1K 234M 2G)")
+parser.add_option("-H", "--si",
+      action="store_const", const='-H', dest="sizeformat",
+      help="likewise, but use powers of 1000 not 1024")
+parser.add_option("-b", "--block-size",
+      action="store", dest="blocksize", default=0, type="int",
+      help="use BLOCKSIZE-byte blocks")
+parser.add_option("-l", "--local",
+      action="store_true", dest="local_only", default=False,
+      help="limit listing to local filesystems")
+parser.add_option("-k", "--kilobytes",
+      action="store_const", const='-k', dest="sizeformat",
+      help="like --block-size=1024")
+parser.add_option("-m", "--megabytes",
+      action="store_const", const='-m', dest="sizeformat",
+      help="like --block-size=1048576")
+parser.add_option("-g", "--gigabytes",
+      action="store_const", const='-g', dest="sizeformat",
+      help="like --block-size=1073741824")
+parser.add_option("", "--blocks",
+      action="store_const", const='--blocks', dest="sizeformat",
+      help="use filesystem native block size")
+parser.add_option("", "--bw",
+      action="store_true", dest="b_w", default=False,
+      help="do not use colours")
+#parser.add_option("", "--sum",
+#      action="store_true", dest="do_total_sum", default=False,
+#      help="display sum of all the displayed sizes")
+parser.add_option("", "--mounts",
+      action="store", dest="mounts_file", type="string",
+      help="""File to get mount information from.
+On normal Linux systems only /etc/mtab or /proc/mounts make sense.
+Some other Unices use /etc/mnttab.
+Use /proc/mounts when /etc/mtab is corrupted or inaccessible 
+(the output looks a bit weird in this case).""")
+parser.add_option("-B", "--show-binds",
+     action="store_false", dest="hidebinds", default=hidebinds,
+     help="show 'mount --bind' mounts")
+parser.add_option("-i", "--inodes",
+     action="store_true", dest="inodes", default=False,
+     help="show inode instead of block usage")
+parser.add_option("", "--no-disk",
+     action="store_false", dest="show_disk", default=show_disk,
+     help="omit disk vendor/model column (faster, matches classic layout)")
+
+(options, args) = parser.parse_args()
+
+blocksize = options.blocksize
+allfss = options.show_all
+localonly = options.local_only
+hidebinds = options.hidebinds
+inodes = options.inodes
+if inodes:
+    header["size"] = "Nodes"
+
+if options.sizeformat:
+    sizeformat = options.sizeformat
+
+#if options.do_total_sum:
+#    do_total_sum = True
+
+if options.b_w:
+    normal_colour = header_colour = local_fs_colour = remote_fs_colour = special_fs_colour = filled_fs_colour = full_fs_colour = 'none'
+if options.mounts_file:
+    mountfile = options.mounts_file
+
+if not options.show_disk:
+    format = [col for col in format if col[0] not in ("disk", "iface", "speed")]
+else:
+    if not any(col[0] == "disk" for col in format):
+        new_fmt = []
+        inserted = False
+        for col in format:
+            new_fmt.append(col)
+            if not inserted and col[0] == "on":
+                new_fmt.append(("disk", 22, "l"))
+                inserted = True
+        if not inserted:
+            new_fmt.append(("disk", 22, "l"))
+        format = new_fmt
+    if any(col[0] == "disk" for col in format):
+        if not any(col[0] == "iface" for col in format) or not any(col[0] == "speed" for col in format):
+            new_fmt = []
+            has_iface = any(c[0] == "iface" for c in format)
+            has_speed = any(c[0] == "speed" for c in format)
+            for col in format:
+                new_fmt.append(col)
+                if col[0] == "disk":
+                    if not has_iface:
+                        new_fmt.append(("iface", 6, "l"))
+                    if not has_speed:
+                        new_fmt.append(("speed", 28, "l"))
+            format = new_fmt
+
+terminal_width = get_terminal_width()
+
+mountpoints = get_all_mountpoints()
+
+if args:
+    mp_to_display = [find_mountpoint(os.path.realpath(x)) for x in args]
+    mp_to_display = [x for x in mp_to_display if x is not None]
+else:
+    mp_to_display = list(mountpoints.keys())
+    if localonly:
+        mp_to_display = [x for x in mp_to_display if not is_remote_fs(mountpoints[x][1])]
+    mp_to_display.sort()
+
+table = get_table(mp_to_display)
+display_table(table, terminal_width)
+
+
