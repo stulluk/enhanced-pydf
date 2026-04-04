@@ -16,8 +16,10 @@ I have used the classic `pydf` package (also on [PyPI](https://pypi.org/project/
 | NVMe PCIe info | — | **Gen × lanes** from sysfs (`max_link_speed` / `max_link_width`) plus a **static ~GB/s hint** (approximate one-way theoretical data rate) |
 | SATA speed | — | **From sysfs** (`sata_spd` per ATA link), not a blind “6 Gb/s” guess — e.g. SATA II shows **3.0 Gbps** when the kernel reports it |
 | USB | — | Rough class speed from sysfs `speed` (Mbps) where available |
-| Column layout | Default | **`Disk`**, **`Bus`**, **`Link max`** after **Mounted on** (configurable via `~/.pydfrc` like upstream) |
-| Opt out | — | **`--no-disk`** removes the three extra columns (classic layout) |
+| PCI BDF | — | **Optional** — **`--pci-bdf`** (or `show_pci_bdf = True` in `pydfrc`) adds **`PCI BDF`** after **Disk** to tell identical drives apart (NVMe `address` or last BDF in the block device path) |
+| Sort order | Mount path only | **`--sort-by-filesystem`** sorts by block device name, then mount point |
+| Column layout | Default | **`Disk`**, **`Bus`**, **`Link max`** after **Mounted on**; **`PCI BDF`** only when enabled (configurable via `~/.pydfrc` like upstream) |
+| Opt out | — | **`--no-disk`** removes the extra disk-related columns (classic layout) |
 | Version string | `12` | `12+disk+bus` |
 
 **Performance:** One `lsblk -P` call per backing block device (cached per device), plus small sysfs reads. SATA link resolution uses `scsi_host` **`port_no`** or **`unique_id`** to map to the correct `linkN`; if that fails and only one ATA link exists on the controller, that link’s speed is used as a fallback.
@@ -43,13 +45,15 @@ You can also run it from a clone: `./pydf`.
 ## Usage
 
 ```bash
-pydf              # default: extra disk / bus / link columns (unless disabled in pydfrc)
-pydf --no-disk    # same column set as classic pydf (no extra columns)
-pydf --bw         # no colours (good for logs or README captures)
-pydf -v           # version: 12+disk+bus
+pydf                      # default: Disk, Bus, Link max (unless disabled in pydfrc)
+pydf --pci-bdf            # also show PCI BDF after Disk
+pydf --sort-by-filesystem # sort by block device, then mount point
+pydf --no-disk            # same column set as classic pydf (no extra columns)
+pydf --bw                 # no colours (good for logs or README captures)
+pydf -v                   # version: 12+disk+bus
 ```
 
-Configuration via **`/etc/pydfrc`** or **`~/.pydfrc`** works like upstream (`format`, colours, etc.). If your `format` omits the new columns, they are **re-injected** after **`on`** (and **`iface` / `speed`** after **`disk`**) unless you pass **`--no-disk`**.
+Configuration via **`/etc/pydfrc`** or **`~/.pydfrc`** works like upstream (`format`, colours, etc.). If your `format` omits the new columns, **`disk`**, **`iface`**, and **`speed`** are **re-injected** after **`on`** / **`disk`** unless you pass **`--no-disk`**. **`PCI BDF`** is only injected when **`--pci-bdf`** is set or **`show_pci_bdf = True`** in `pydfrc`; without that, any **`pci`** column in `format` is stripped.
 
 ## Output comparison (same machine, clean `HOME`, `--bw`)
 

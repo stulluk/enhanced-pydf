@@ -171,6 +171,8 @@ format = [
 
 # When False, the disk column is omitted (see also --no-disk).
 show_disk = True
+# When True (or --pci-bdf), the PCI BDF column is shown after Disk (see also --pci-bdf).
+show_pci_bdf = False
 
 
 barchar = '#'
@@ -190,6 +192,7 @@ for conffile in ["/etc/pydfrc", os.environ['HOME']+"/.pydfrc"]:
 header =    {
             'fs'     :    "Filesystem",
             'disk'   :    "Disk",
+            'pci'    :    "PCI BDF",
             'iface'  :    "Bus",
             'speed'  :    "Link max",
             'size'   :    "Size",
@@ -730,9 +733,34 @@ def _disk_model_sysfs(dev_path):
     return _unescape_udev_enc(combined) if combined != "-" else combined
 
 
+def _backend_pci_bdf(backend_dev):
+    "PCI domain:BDF for the storage endpoint (NVMe sysfs address, else last BDF in block device path)."
+    bn = os.path.basename(os.path.realpath(backend_dev))
+    m = re.match(r"(nvme\d+)n\d+", bn)
+    if m:
+        addr_f = "/sys/class/nvme/%s/address" % m.group(1)
+        if os.path.isfile(addr_f):
+            txt = _read_sysfs_text(addr_f)
+            if txt:
+                return txt
+    dev_l = "/sys/block/%s/device" % bn
+    if not os.path.exists(dev_l):
+        return "-"
+    try:
+        rp = os.path.realpath(dev_l)
+    except OSError:
+        return "-"
+    parts = re.findall(
+        r"([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.\d)", rp, re.I
+    )
+    if parts:
+        return parts[-1]
+    return "-"
+
+
 def disk_row_extras(device_raw, fstype):
-    "Return (disk_label, bus_label, theoretical_link) for a mount device; cached per rpath."
-    blank = ("-", "-", "-")
+    "Return (disk_label, pci_bdf, bus_label, theoretical_link); cached per rpath."
+    blank = ("-", "-", "-", "-")
     if is_remote_fs(fstype):
         return blank
     if not device_raw or not device_raw.startswith("/dev/"):
@@ -753,9 +781,10 @@ def disk_row_extras(device_raw, fstype):
     bn = os.path.basename(os.path.realpath(backend))
     if not tran_l:
         tran_l = _infer_tran_from_basename(bn)
+    pci_l = _backend_pci_bdf(backend)
     iface_l = _iface_display(tran_l)
     spd_l = _theoretical_link_speed(tran_l, backend)
-    row = (disk_l, iface_l, spd_l)
+    row = (disk_l, pci_l, iface_l, spd_l)
     _disk_info_cache[rpath] = row
     return row
 
@@ -821,10 +850,11 @@ def get_row_mp(mp):
                 perc_f = '-'
 
 
-        dsk_l, if_l, sp_l = disk_row_extras(device_raw, fstype)
+        dsk_l, pci_l, if_l, sp_l = disk_row_extras(device_raw, fstype)
         info = {
             'fs'     :    device,
             'disk'   :    dsk_l,
+            'pci'    :    pci_l,
             'iface'  :    if_l,
             'speed'  :    sp_l,
             'size'   :    size_f,
@@ -1052,6 +1082,12 @@ parser.add_option("-i", "--inodes",
 parser.add_option("", "--no-disk",
      action="store_false", dest="show_disk", default=show_disk,
      help="omit disk vendor/model column (faster, matches classic layout)")
+parser.add_option("", "--sort-by-filesystem",
+     action="store_true", dest="sort_by_filesystem", default=False,
+     help="sort rows by block device name, then mount point (default: by mount path only)")
+parser.add_option("", "--pci-bdf",
+     action="store_true", dest="show_pci_bdf", default=show_pci_bdf,
+     help="show PCI BDF column after Disk (NVMe/SATA endpoint address)")
 
 (options, args) = parser.parse_args()
 
@@ -1075,7 +1111,7 @@ if options.mounts_file:
     mountfile = options.mounts_file
 
 if not options.show_disk:
-    format = [col for col in format if col[0] not in ("disk", "iface", "speed")]
+    format = [col for col in format if col[0] not in ("disk", "pci", "iface", "speed")]
 else:
     if not any(col[0] == "disk" for col in format):
         new_fmt = []
@@ -1089,7 +1125,9 @@ else:
             new_fmt.append(("disk", 22, "l"))
         format = new_fmt
     if any(col[0] == "disk" for col in format):
-        if not any(col[0] == "iface" for col in format) or not any(col[0] == "speed" for col in format):
+        if not any(col[0] == "iface" for col in format) or not any(
+            col[0] == "speed" for col in format
+        ):
             new_fmt = []
             has_iface = any(c[0] == "iface" for c in format)
             has_speed = any(c[0] == "speed" for c in format)
@@ -1101,6 +1139,15 @@ else:
                     if not has_speed:
                         new_fmt.append(("speed", 28, "l"))
             format = new_fmt
+        if options.show_pci_bdf and not any(col[0] == "pci" for col in format):
+            new_fmt = []
+            for col in format:
+                new_fmt.append(col)
+                if col[0] == "disk":
+                    new_fmt.append(("pci", 13, "l"))
+            format = new_fmt
+if not options.show_pci_bdf:
+    format = [col for col in format if col[0] != "pci"]
 
 terminal_width = get_terminal_width()
 
@@ -1113,6 +1160,17 @@ else:
     mp_to_display = list(mountpoints.keys())
     if localonly:
         mp_to_display = [x for x in mp_to_display if not is_remote_fs(mountpoints[x][1])]
+
+def _mount_sort_key_filesystem(mp):
+    "Sort by source device string, then mount path (stable grouping for partitions)."
+    if mp not in mountpoints:
+        return ("", mp)
+    dev, _typ, _opts = mountpoints[mp]
+    return (niceprint_fs(dev), mp)
+
+if options.sort_by_filesystem:
+    mp_to_display.sort(key=_mount_sort_key_filesystem)
+elif not args:
     mp_to_display.sort()
 
 table = get_table(mp_to_display)
