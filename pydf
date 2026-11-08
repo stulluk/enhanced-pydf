@@ -156,7 +156,7 @@ size_colour = 'bright_blue'
 avail_colour = ('bold', 'yellow')
 custom_device_colour = {} #TODO
 
-sizeformat = "-h"
+sizeformat = "-G" # whole gigabytes
 column_separator = ' '
 column_separator_colour = 'none'
 row_separator = ''
@@ -285,6 +285,11 @@ def myformat(number, sizeformat, fs_blocksize):
         sn = round(size/(1024.*1024*1024))
         sn = int(sn)
         return str(sn)
+    elif sizeformat == "-G":
+        gib = size/(1024.*1024*1024)
+        if gib < 1:
+            return "0G"
+        return str(int(round(gib)))+"G"
     elif sizeformat == "-h":
         return hfnum(size, 1024)
     elif sizeformat == "-H":
@@ -917,7 +922,7 @@ def get_row_mp(mp):
         column_colour = current_colour
         if mp and j[0]=='size':
             column_colour = size_colour
-        elif mp and j[0]=='avail':
+        elif mp and j[0]=='avail' and perc <= FILL_THRESH:
             column_colour = avail_colour
 
         column = [column_colour, text]
@@ -1130,6 +1135,9 @@ if inodes:
 
 if options.sizeformat:
     sizeformat = options.sizeformat
+elif inodes and sizeformat == "-G":
+    # inode counts are not bytes, keep the human readable form
+    sizeformat = "-h"
 
 #if options.do_total_sum:
 #    do_total_sum = True

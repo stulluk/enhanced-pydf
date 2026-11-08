@@ -19,7 +19,8 @@ I have used the classic `pydf` package (also on [PyPI](https://pypi.org/project/
 | PCI BDF | — | **Optional** — **`--pci-bdf`** (or `show_pci_bdf = True` in `pydfrc`) adds **`PCI BDF`** after **Disk** to tell identical drives apart (NVMe `address` or last BDF in the block device path) |
 | Sort order | Mount path only | **`--sort-by-filesystem`** sorts by block device name, then mount point |
 | Usage bar | Same width on every row | **Length proportional to capacity** — the largest filesystem gets the full bar, smaller ones are drawn shorter |
-| Size / Avail colours | Same as the row | **`Size`** values are light blue, **`Avail`** values are bold yellow (`size_colour` / `avail_colour` in `pydfrc`) |
+| Size / Avail colours | Same as the row | **`Size`** values are light blue, **`Avail`** values are bold yellow and return to the warning colours once the filesystem is above the fill threshold (`size_colour` / `avail_colour` in `pydfrc`) |
+| Size unit | Mixed `k` / `M` / `G` | **Always whole `G`** by default — below 1G shows `0G`, otherwise rounded to the nearest G; `-h`, `-H`, `-k`, `-m`, `-g`, `-b` and `-i` keep their upstream output |
 | Column layout | Default | **`Disk`**, **`Bus`**, **`Link max`** after **Mounted on**; **`PCI BDF`** only when enabled (configurable via `~/.pydfrc` like upstream) |
 | Opt out | — | **`--no-disk`** removes the extra disk-related columns (classic layout) |
 | Version string | `12` | `12+disk+bus` |
@@ -47,7 +48,8 @@ You can also run it from a clone: `./pydf`.
 ## Usage
 
 ```bash
-pydf                      # default: Disk, Bus, Link max (unless disabled in pydfrc)
+pydf                      # default: sizes in whole G; Disk, Bus, Link max (unless disabled in pydfrc)
+pydf -h                   # mixed k / M / G units, like upstream
 pydf --pci-bdf            # also show PCI BDF after Disk
 pydf --sort-by-filesystem # sort by block device, then mount point
 pydf --no-disk            # same column set as classic pydf (no extra columns)
@@ -64,7 +66,7 @@ The bar length follows the filesystem size: the largest listed filesystem takes 
 ```text
 Filesystem      Size  Used Avail Use%                                      Mounted on
 /dev/nvme2n1p6  257G  166G   79G 64.4 [###..]                              /
-/dev/nvme1n1p2 1073M   11M 1062M  1.0 [.]                                  /boot/efi
+/dev/nvme1n1p2    1G    0G    1G  1.0 [.]                                  /boot/efi
 /dev/nvme2n1p5  657G  157G  498G 24.0 [###.........]                       /media/DATA
 /dev/sda1       504G  172G  332G 34.0 [###......]                          /media/G550
 /dev/sda2       412G  349G   62G 84.7 [#######.]                           /media/H450
@@ -72,12 +74,12 @@ Filesystem      Size  Used Avail Use%                                      Mount
 /dev/nvme0n1    916G  710G  204G 77.5 [#############....]                  /media/NEW1TB
 /dev/nvme1n1p1  234G  114G  117G 48.7 [##..]                               /media/UBUNTU24
 /dev/nvme3n1   1833G 1545G  284G 84.3 [#############################.....] /media/WORK
-efivarfs        256k   71k  180k 27.7 [.]                                  /sys/firmware/efi/efivars
+efivarfs          0G    0G    0G 27.7 [.]                                  /sys/firmware/efi/efivars
 ```
 
 ## Output comparison (same machine, clean `HOME`, `--bw`)
 
-These samples compare the extra columns and were captured before capacity-scaled bars were added.
+These samples compare the extra columns and were captured before capacity-scaled bars and whole-G sizes were added.
 
 The following samples were produced on one developer machine with an empty `HOME` so no personal `pydfrc` overrides the default column layout.
 
