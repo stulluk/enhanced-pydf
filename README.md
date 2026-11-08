@@ -30,7 +30,7 @@ I have used the classic `pydf` package (also on [PyPI](https://pypi.org/project/
 ## Requirements
 
 - Linux (paths and tools assume a typical util-linux + sysfs layout).
-- Python 2.7 or Python 3.x (same baseline as upstream).
+- Python 3.x. The script starts with `#!/usr/bin/python3`, because current distributions no longer ship `/usr/bin/python`. Python 2.7 remains the upstream baseline, but it must be started explicitly: `python2 pydf`.
 - `lsblk` from **util-linux** (for `VENDOR`, `MODEL`, `TRAN`, `PKNAME`).
 
 ## Installation
