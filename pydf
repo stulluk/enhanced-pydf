@@ -32,10 +32,12 @@ except TypeError:
     str_center = lambda x, y, z: string.center (x, y).replace(' ', z)
 
 class Bar:
-    def __init__(self, percentage=0, width=2, header=False):
+    def __init__(self, percentage=0, width=2, header=False, capacity=0):
         self.percentage = percentage
         self.width = width
         self.header = header
+        self.capacity = capacity
+        self.scale = 1.0 # bar length relative to the largest filesystem
 
     def __len__(self):
         return self.width
@@ -46,8 +48,12 @@ class Bar:
     def format(self, pos):
         if self.header:
             return ' '*self.width
-        size = int(round(self.percentage*(self.width-2)))
-        return '['+manglestring(size*barchar, self.width-2, pos, bar_fillchar)+']'
+        inner = self.width-2
+        # keep at least one cell, so that tiny filesystems do not vanish
+        scaled = min(inner, max(1, int(round(self.scale*inner))))
+        size = int(round(self.percentage*scaled))
+        bar = '['+manglestring(size*barchar, scaled, pos, bar_fillchar)+']'
+        return manglestring(bar, self.width, pos)
 
 
 def get_terminal_width_termios():
@@ -829,6 +835,7 @@ def get_row_mp(mp):
         inodes_used = inodes_size - inodes_free
 
         if inodes:
+            capacity = inodes_size
             size_f = myformat(inodes_size, sizeformat, 1)
             used_f = myformat(inodes_used, sizeformat, 1)
             avail_f = myformat(inodes_avail, sizeformat, 1)
@@ -839,6 +846,7 @@ def get_row_mp(mp):
                 perc = 0
                 perc_f = '-'
         else:
+            capacity = size*fs_blocksize
             size_f = myformat(size, sizeformat, fs_blocksize)
             used_f = myformat(used, sizeformat, fs_blocksize)
             avail_f = myformat(avail, sizeformat, fs_blocksize)
@@ -891,7 +899,7 @@ def get_row_mp(mp):
                 elif perc > FILL_THRESH:
                     current_colour = filled_fs_colour
             if j[0]=='bar':
-                info['bar'] = Bar(perc/100., width)
+                info['bar'] = Bar(perc/100., width, capacity=capacity)
 
             text = info[j[0]]
             # if there are control or invalid unicode characters in mountpoint names
@@ -932,7 +940,17 @@ def get_table(mps):
         row = get_row_mp(mp)
         if row is not None:
             rows.append(row)
+    scale_bars(rows[1:])
     return rows
+
+
+def scale_bars(rows):
+    "make bar lengths proportional to the largest filesystem in rows"
+    bars = [column[1] for row in rows for column in row if isinstance(column[1], Bar)]
+    largest = max([bar.capacity for bar in bars] + [0])
+    if largest:
+        for bar in bars:
+            bar.scale = float(bar.capacity)/largest
 
 
 def squeeze_table(table, desired_width):

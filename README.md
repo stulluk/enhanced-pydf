@@ -18,6 +18,7 @@ I have used the classic `pydf` package (also on [PyPI](https://pypi.org/project/
 | USB | — | Rough class speed from sysfs `speed` (Mbps) where available |
 | PCI BDF | — | **Optional** — **`--pci-bdf`** (or `show_pci_bdf = True` in `pydfrc`) adds **`PCI BDF`** after **Disk** to tell identical drives apart (NVMe `address` or last BDF in the block device path) |
 | Sort order | Mount path only | **`--sort-by-filesystem`** sorts by block device name, then mount point |
+| Usage bar | Same width on every row | **Length proportional to capacity** — the largest filesystem gets the full bar, smaller ones are drawn shorter |
 | Column layout | Default | **`Disk`**, **`Bus`**, **`Link max`** after **Mounted on**; **`PCI BDF`** only when enabled (configurable via `~/.pydfrc` like upstream) |
 | Opt out | — | **`--no-disk`** removes the extra disk-related columns (classic layout) |
 | Version string | `12` | `12+disk+bus` |
@@ -55,7 +56,27 @@ pydf -v                   # version: 12+disk+bus
 
 Configuration via **`/etc/pydfrc`** or **`~/.pydfrc`** works like upstream (`format`, colours, etc.). If your `format` omits the new columns, **`disk`**, **`iface`**, and **`speed`** are **re-injected** after **`on`** / **`disk`** unless you pass **`--no-disk`**. **`PCI BDF`** is only injected when **`--pci-bdf`** is set or **`show_pci_bdf = True`** in `pydfrc`; without that, any **`pci`** column in `format` is stripped.
 
+## Capacity-scaled usage bars
+
+The bar length follows the filesystem size: the largest listed filesystem takes the full bar width, and every other bar is shortened by the same ratio, so one `#` stands for the same amount of space on every row. The reference is the largest **listed filesystem** (partition), not the physical disk behind it. With `-i`, inode counts are compared instead of bytes. A very small filesystem still gets one cell (`[.]`), and the bar resolution depends on the terminal width.
+
+```text
+Filesystem      Size  Used Avail Use%                                      Mounted on
+/dev/nvme2n1p6  257G  166G   79G 64.4 [###..]                              /
+/dev/nvme1n1p2 1073M   11M 1062M  1.0 [.]                                  /boot/efi
+/dev/nvme2n1p5  657G  157G  498G 24.0 [###.........]                       /media/DATA
+/dev/sda1       504G  172G  332G 34.0 [###......]                          /media/G550
+/dev/sda2       412G  349G   62G 84.7 [#######.]                           /media/H450
+/dev/nvme1n1p3  680G  564G  115G 82.9 [###########..]                      /media/KINGDATA
+/dev/nvme0n1    916G  710G  204G 77.5 [#############....]                  /media/NEW1TB
+/dev/nvme1n1p1  234G  114G  117G 48.7 [##..]                               /media/UBUNTU24
+/dev/nvme3n1   1833G 1545G  284G 84.3 [#############################.....] /media/WORK
+efivarfs        256k   71k  180k 27.7 [.]                                  /sys/firmware/efi/efivars
+```
+
 ## Output comparison (same machine, clean `HOME`, `--bw`)
+
+These samples compare the extra columns and were captured before capacity-scaled bars were added.
 
 The following samples were produced on one developer machine with an empty `HOME` so no personal `pydfrc` overrides the default column layout.
 
