@@ -129,8 +129,9 @@ colours = {
             'magenta'    :    "\033[35m",
             'cyan'       :    "\033[36m",
             'white'      :    "\033[37m",
+            'bright_blue':    "\033[94m",
 
-            'on_black'   :    "\033[40m", 
+            'on_black'   :    "\033[40m",
             'on_red'     :    "\033[41m",
             'on_green'   :    "\033[42m",
             'on_yellow'  :    "\033[43m",
@@ -151,6 +152,8 @@ special_fs_colour = 'blue'
 readonly_fs_colour = 'cyan'
 filled_fs_colour = 'red'
 full_fs_colour = 'on_red'
+size_colour = 'bright_blue'
+avail_colour = ('bold', 'yellow')
 custom_device_colour = {} #TODO
 
 sizeformat = "-h"
@@ -911,7 +914,13 @@ def get_row_mp(mp):
             if j[0]=='bar':
                 text.width = width
 
-        column = [current_colour, text]
+        column_colour = current_colour
+        if mp and j[0]=='size':
+            column_colour = size_colour
+        elif mp and j[0]=='avail':
+            column_colour = avail_colour
+
+        column = [column_colour, text]
         row.append(column)
 
     return row
@@ -1034,6 +1043,8 @@ def display_table(table, terminal_width):
             else:
                 out(colsepcol)
                 out(column_separator)
+            # reset first, so that bold does not leak into the next column
+            out(makecolour(normal_colour))
             out(makecolour(colourcode))
             out(text)
         out(row_separator)
@@ -1124,7 +1135,7 @@ if options.sizeformat:
 #    do_total_sum = True
 
 if options.b_w:
-    normal_colour = header_colour = local_fs_colour = remote_fs_colour = special_fs_colour = filled_fs_colour = full_fs_colour = 'none'
+    normal_colour = header_colour = local_fs_colour = remote_fs_colour = special_fs_colour = filled_fs_colour = full_fs_colour = size_colour = avail_colour = 'none'
 if options.mounts_file:
     mountfile = options.mounts_file
 

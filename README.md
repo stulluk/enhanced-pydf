@@ -19,6 +19,7 @@ I have used the classic `pydf` package (also on [PyPI](https://pypi.org/project/
 | PCI BDF | — | **Optional** — **`--pci-bdf`** (or `show_pci_bdf = True` in `pydfrc`) adds **`PCI BDF`** after **Disk** to tell identical drives apart (NVMe `address` or last BDF in the block device path) |
 | Sort order | Mount path only | **`--sort-by-filesystem`** sorts by block device name, then mount point |
 | Usage bar | Same width on every row | **Length proportional to capacity** — the largest filesystem gets the full bar, smaller ones are drawn shorter |
+| Size / Avail colours | Same as the row | **`Size`** values are light blue, **`Avail`** values are bold yellow (`size_colour` / `avail_colour` in `pydfrc`) |
 | Column layout | Default | **`Disk`**, **`Bus`**, **`Link max`** after **Mounted on**; **`PCI BDF`** only when enabled (configurable via `~/.pydfrc` like upstream) |
 | Opt out | — | **`--no-disk`** removes the extra disk-related columns (classic layout) |
 | Version string | `12` | `12+disk+bus` |
